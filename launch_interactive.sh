@@ -1,0 +1,11 @@
+srun \
+--partition=RTXA6000 \
+--nodes=1 \
+--ntasks=2 \
+--cpus-per-task=4 \
+--time 02:00:00 \
+--gpus-per-task=1 \
+--gpu-bind=none \
+--container-image=/netscratch/teddy/enroot/nvcr.io_nvidia_pytorch_23.08-py3.sqsh \
+--container-workdir="`pwd`"  --container-mounts=/netscratch:/netscratch,/ds:/ds:ro,`pwd`:`pwd` \
+--mem-per-cpu=16G --pty /bin/bash

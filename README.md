@@ -23,14 +23,21 @@ sudo python3 setup.py develop
 ## Check example folder for more details
 log_dir = "./logs/exp_001"
 tb_logger = TBLogger(logdir=os.path.join(log_dir, "tensor_board"))
-topk_logger = TopKLogger(topk=2, logdir=os.path.join(log_dir, "topk"), monitor="val/psnr", monitor_mode="max")
+topk_logger = TopKLogger(topk=2,
+                        logdir=os.path.join(log_dir, "topk"),
+                        monitor="val/psnr",
+                        monitor_mode="max")
 ult_model = UlMLP()
 trainer = UlTrainer(
-    model=ult_model, topk_logger=topk_logger, tb_logger=tb_logger,
+    model=ult_model,
+    topk_logger=topk_logger,
+    tb_logger=tb_logger,
     validate_every_x_epoch=1,
     max_epochs=40,
     log_root=log_dir,
     tb_log_steps=2)
+
+
 trainer.train()
 
 ```

@@ -3,6 +3,8 @@
 """
 
 import os
+import tempfile
+import shutil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,9 +41,9 @@ class UlMLP(UlModule):
 
     def __init__(self) -> None:
         super().__init__()
-        layers = [nn.Linear(10, 10)]
+        layers = [nn.Linear(10, 1000)]
         layers.append(nn.ReLU())
-        layers.append(nn.Linear(10, 1))
+        layers.append(nn.Linear(1000, 1))
         self.global_step = 0
         self.model = nn.Sequential(*layers)
 
@@ -76,7 +78,7 @@ class UlMLP(UlModule):
         """
             Training Data Loader
         """
-        dataset = MyTrainDataset(10000)
+        dataset = MyTrainDataset(100000)
         sampler = DistributedSampler(dataset)
         return DataLoader(dataset,
                           drop_last=False,
@@ -106,14 +108,18 @@ class UlMLP(UlModule):
         return [optimizer], [None]
 
 if __name__ == "__main__":    
-    log_dir = "./logs/exp_001"
+    log_dir = "./logs/exp_008"
     tb_logger = TBLogger(logdir=os.path.join(log_dir, "tensor_board"))
     topk_logger = TopKLogger(topk=2, logdir=os.path.join(log_dir, "topk"), monitor="val/psnr", monitor_mode="max")
     ult_model = UlMLP()
+
     trainer = UlTrainer(
         model=ult_model, topk_logger=topk_logger, tb_logger=tb_logger,
         validate_every_x_epoch=1,
         max_epochs=40,
         log_root=log_dir,
-        tb_log_steps=2)
+        tb_log_steps=2,
+        use_ema=True,
+        ema_update_interval=5)
+    
     trainer.train()

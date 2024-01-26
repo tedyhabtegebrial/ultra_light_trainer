@@ -1,9 +1,14 @@
+import os
+import tqdm
+import torch
+import random
+import numpy as np
 import gc
 import tempfile
 import json
 from contextlib import contextmanager
 import torch.distributed as dist
-
+import tempfile
 
 from ul_trainer.loggers import TBLogger
 from ul_trainer.loggers import TopKLogger
@@ -23,19 +28,17 @@ from ul_trainer.utils import choice, dummy_progress_bar
 from ul_trainer.utils import torch_save
 from ul_trainer.utils import torch_load
 from ul_trainer.utils import exists, list_dir
-
+from ul_trainer.ema import EMA
 import torch.nn.functional as F
+
 import torch.nn as nn
-import os
-import tqdm
-import torch
-import random
-import numpy as np
+
 
 def seed_all(seed=43):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    return
+    # random.seed(seed)
+    # torch.manual_seed(seed)
+    # np.random.seed(seed)
 
 def ddp_setup():
     init_process_group(backend="nccl")
@@ -57,6 +60,8 @@ class UlTrainer:
         max_epochs: int = 100,
         log_root: str = None,
         tb_log_steps: int = 10,
+        use_ema: bool = False,
+        ema_update_interval: int = 5,
     ) -> None:
         self._set_device_and_rank()
         self.logdir = log_root
@@ -70,11 +75,14 @@ class UlTrainer:
         # Loading weights for the model
         self.model = model.to(self.device)
         self.tb_logger = tb_logger
+        self.use_ema = use_ema
+        self.ema_update_interval = ema_update_interval
         self.validation_global_idx = 0
         self.validation_scalar_idx = 0
         self.validation_image_idx = 0
         self.topk_logger = topk_logger
         self._configure_optimizers()
+        self._setup_ema()
         ddp_setup()
         self.resume()
         if is_initialized():
@@ -83,6 +91,28 @@ class UlTrainer:
             raise RuntimeError("No Distributed Training Initialized")
         if self.rank_zero and self.configs_save is not None:
             os.makedirs(self.logdir, exist_ok=True)
+
+    def _setup_ema(self):
+        self.model_ema = None
+        if self.use_ema:
+            self.model_ema = EMA(self.model)
+
+    @contextmanager
+    def ema_scope(self, context=None):
+        if self.use_ema:
+            model_ = self.model.module if is_initialized() else self.model
+            self.model_ema.store(model_)
+            self.model_ema.copy_to(model_)
+            if context is not None:
+                print(f"{context}: Switched to EMA weights")
+        try:
+            yield None
+        finally:
+            if self.use_ema:
+                model_ = self.model.module if is_initialized() else self.model
+                self.model_ema.restore(model_)
+                if context is not None:
+                    print(f"{context}: Restored training weights")
 
     def _set_device_and_rank(self):
         if not torch.cuda.is_available():
@@ -131,9 +161,15 @@ class UlTrainer:
             self.cmd_logger.info(f"No Save Model found at {topk_path}")
             model_snapshot = {}
 
+        if "EMA_MODEL_STATE_DICT" in model_snapshot:
+            ema_sd = model_snapshot["EMA_MODEL_STATE_DICT"]
+            if self.use_ema:
+                self.model_ema.load_state_dict(ema_sd)
+                self.cmd_logger.info("FOUND Saved EMA Parameters")
+
         self.topk_logger.restart()
         if "EPOCH_IDX" in model_snapshot:
-            self.epoch_idx = model_snapshot["EPOCH_IDX"] + 1
+            self.epoch_idx = model_snapshot["EPOCH_IDX"] # + 1
         if "GLOBAL_STEP" in model_snapshot:
             self.global_step = model_snapshot["GLOBAL_STEP"]
         else:
@@ -208,6 +244,8 @@ class UlTrainer:
         meta_data["GLOBAL_STEP"] = global_idx
         meta_data["MODEL_STATE_DICT"] = model.cpu().state_dict()
         meta_data["TOPK"] = self.topk_logger.state_dict()
+        if self.use_ema:
+            meta_data["EMA_MODEL_STATE_DICT"] = self.model_ema.state_dict()
         model.to(self.device)
         for i, optim in enumerate(self.optimizer_list):
             if optim is not None:
@@ -223,6 +261,8 @@ class UlTrainer:
             [train_data, train_sampler],
             train_data is None)
         for epoch in range(self.epoch_idx, self.max_epochs):
+            # if epoch==0:
+            #     t_file = tempfile.NamedTemporaryFile(dir="./")
             self.model.module.eval()
             val_summary = self.validate()
             self.model.module.train()
@@ -231,8 +271,12 @@ class UlTrainer:
                     self.cmd_logger.info(f"Starting Validation Epoch {epoch}")
                 self.model.module.eval()
                 with torch.no_grad():
-                    val_summary = self.validate()
+                    val_summary = self.validate(using_ema=False)
                     torch.cuda.empty_cache()
+                    if self.use_ema:
+                        with self.ema_scope("validate: "):
+                            val_summary_ema = self.validate(using_ema=True)
+                            val_summary.update(val_summary_ema)
                 self.topk_logger(
                     self._get_topk_meta_data(self.model.module,
                                              self.epoch_idx,
@@ -277,7 +321,7 @@ class UlTrainer:
         raise NotImplementedError
 
     @torch.no_grad()
-    def validate(self, val_data=None):
+    def validate(self, val_data=None, using_ema=False):
         val_summary = {}
         val_data = choice(self.model.module.val_dataloader()
                           [0], val_data, val_data is None)
@@ -289,6 +333,15 @@ class UlTrainer:
             for batch_idx, batch in enumerate(val_data):
                 batch = self.batch_process(batch)
                 logs = self.model.module.validation_step(batch, batch_idx)
+                if using_ema:
+                    logs["scalar"] = {
+                        k + "_ema": v
+                        for k, v in logs["scalar"].items()
+                    }
+                    logs["image"] = {
+                        k + "_ema": v
+                        for k, v in logs["image"].items()
+                    }
                 scalar_logs, img_logs = logs["scalar"], logs["image"]
                 scalar_logs = self._gather_logs(scalar_logs, dtype="scalar")
                 if batch_idx == 0:
@@ -349,6 +402,12 @@ class UlTrainer:
         self._optimizer_step()
         self._optimizer_zero_grad()
         self._scheduler_step()
+        with torch.no_grad():
+            if self.use_ema and ((self.global_step % self.ema_update_interval)==0):
+                if is_initialized():
+                    self.model_ema(self.model.module)
+                else:
+                    self.model_ema(self.model)
         return logs_agg
 
     def run_eval(self, val_data: DataLoader = None, val_sampler: DistributedSampler = None):
@@ -363,6 +422,19 @@ class UlTrainer:
             for batch_idx, batch in enumerate(val_data):
                 batch = self.batch_process(batch)
                 logs = self.model.module.validation_step(batch, batch_idx=0)
+                if self.use_ema:
+                    with self.ema_scope("Run Eval"):
+                        logs_ema = self.model.module.validation_step(batch, batch_idx)
+                    logs_ema["scalar"] = {
+                        k + "_ema": v
+                        for k, v in logs_ema["scalar"].items()
+                    }
+                    logs_ema["image"] = {
+                        k + "_ema": v
+                        for k, v in logs_ema["image"].items()
+                    }
+                    logs["scalar"].update(logs_ema["scalar"])
+                    logs["image"].update(logs_ema["image"])
                 scalar_logs, img_logs = logs["scalar"], logs["image"]
                 scalar_logs = self._gather_logs(scalar_logs, dtype="scalar")
                 if batch_idx == 0:

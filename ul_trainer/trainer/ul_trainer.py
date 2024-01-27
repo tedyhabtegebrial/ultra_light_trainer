@@ -40,11 +40,14 @@ def seed_all(seed=43):
     # torch.manual_seed(seed)
     # np.random.seed(seed)
 
+
 def ddp_setup():
     init_process_group(backend="nccl")
 
+
 def ddp_destroy():
     destroy_process_group()
+
 
 def save_hparams(content, filename):
     OmegaConf.save(config=content, f=filename)
@@ -86,7 +89,9 @@ class UlTrainer:
         ddp_setup()
         self.resume()
         if is_initialized():
-            self.model = DDP(self.model.to(self.device), device_ids=[int(os.environ["LOCAL_RANK"])])
+            self.model = DDP(
+                self.model.to(self.device), device_ids=[int(os.environ["LOCAL_RANK"])]
+            )
         else:
             raise RuntimeError("No Distributed Training Initialized")
         if self.rank_zero and self.configs_save is not None:
@@ -118,14 +123,14 @@ class UlTrainer:
         if not torch.cuda.is_available():
             self.device = "cpu"
             if "LOCAL_RANK" in os.environ:
-                self.rank_zero = int(os.environ['LOCAL_RANK']) == 0
+                self.rank_zero = int(os.environ["LOCAL_RANK"]) == 0
             else:
                 self.rank_zero = True
         else:
             if "LOCAL_RANK" in os.environ:
-                torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
+                torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
                 self.device = f"cuda:{os.environ['LOCAL_RANK']}"
-                self.rank_zero = int(os.environ['LOCAL_RANK']) == 0
+                self.rank_zero = int(os.environ["LOCAL_RANK"]) == 0
             else:
                 torch.cuda.set_device(0)
                 self.device = "cuda:0"
@@ -141,7 +146,7 @@ class UlTrainer:
 
     def resume(self):
         """
-            Resumes training when there is already some data saved
+        Resumes training when there is already some data saved
         """
         if self.topk_logger is None:
             self.cmd_logger.info("No topk found | Fresh training")
@@ -169,21 +174,24 @@ class UlTrainer:
 
         self.topk_logger.restart()
         if "EPOCH_IDX" in model_snapshot:
-            self.epoch_idx = model_snapshot["EPOCH_IDX"] # + 1
+            self.epoch_idx = model_snapshot["EPOCH_IDX"]  # + 1
         if "GLOBAL_STEP" in model_snapshot:
             self.global_step = model_snapshot["GLOBAL_STEP"]
         else:
             dataset_len = len(self.model.train_dataloader())
-            self.global_step = dataset_len*self.epoch_idx
+            self.global_step = dataset_len * self.epoch_idx
         for i, sch in enumerate(self.scheduler_list):
             if f"SCHEDULER_{i}_STATE_DICT" in model_snapshot:
                 if sch is not None:
-                    sch.load_state_dict(
-                        model_snapshot[f"SCHEDULER_{i}_STATE_DICT"])
-        self.cmd_logger.info(f"Rank == {os.environ['LOCAL_RANK']} loading snapshot FINISHED")
-        self.cmd_logger.info(f"Rank == {os.environ['LOCAL_RANK']} Found {model_snapshot.keys()}")
+                    sch.load_state_dict(model_snapshot[f"SCHEDULER_{i}_STATE_DICT"])
+        self.cmd_logger.info(
+            f"Rank == {os.environ['LOCAL_RANK']} loading snapshot FINISHED"
+        )
+        self.cmd_logger.info(
+            f"Rank == {os.environ['LOCAL_RANK']} Found {model_snapshot.keys()}"
+        )
 
-    def batch_process(self, batch, mode='train'):
+    def batch_process(self, batch, mode="train"):
         return self.copy_to_gpu(batch)
 
     def copy_to_gpu(self, batch):
@@ -202,8 +210,8 @@ class UlTrainer:
             return batch
 
     def _configure_optimizers(self):
-        assert hasattr(self, 'model'), "model not defined"
-        assert hasattr(self.model, 'configure_optimizers')
+        assert hasattr(self, "model"), "model not defined"
+        assert hasattr(self.model, "configure_optimizers")
         optimizer_list, scheduler_list = self.model.configure_optimizers()
         self.optimizer_list = optimizer_list
         self.scheduler_list = scheduler_list
@@ -255,18 +263,23 @@ class UlTrainer:
                 meta_data[f"SCHEDULER_{i}_STATE_DICT"] = sch.state_dict()
         return meta_data
 
-    def train(self, train_data: DataLoader = None, train_sampler: DistributedSampler = None):
+    def train(
+        self, train_data: DataLoader = None, train_sampler: DistributedSampler = None
+    ):
         train_data, train_sampler = choice(
             self.model.module.train_dataloader(),
             [train_data, train_sampler],
-            train_data is None)
+            train_data is None,
+        )
         for epoch in range(self.epoch_idx, self.max_epochs):
             # if epoch==0:
             #     t_file = tempfile.NamedTemporaryFile(dir="./")
             self.model.module.eval()
             val_summary = self.validate()
             self.model.module.train()
-            if self.validate_every_x_epoch > 0 and (self.epoch_idx % self.validate_every_x_epoch == 0):
+            if self.validate_every_x_epoch > 0 and (
+                self.epoch_idx % self.validate_every_x_epoch == 0
+            ):
                 if self.rank_zero:
                     self.cmd_logger.info(f"Starting Validation Epoch {epoch}")
                 self.model.module.eval()
@@ -278,37 +291,39 @@ class UlTrainer:
                             val_summary_ema = self.validate(using_ema=True)
                             val_summary.update(val_summary_ema)
                 self.topk_logger(
-                    self._get_topk_meta_data(self.model.module,
-                                             self.epoch_idx,
-                                             self.global_step,
-                                             score=val_summary))
+                    self._get_topk_meta_data(
+                        self.model.module,
+                        self.epoch_idx,
+                        self.global_step,
+                        score=val_summary,
+                    )
+                )
                 self.model.module.train()
             barrier()
-                
+
             if self.rank_zero:
                 self.cmd_logger.info(f"Starting Training Epoch {epoch}")
             self.on_epoch_start()  # TODO
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
             self._optimizer_zero_grad()
-            with tqdm.tqdm(total=len(train_data)
-                           ) if self.rank_zero else dummy_progress_bar() as pb:
+            with tqdm.tqdm(
+                total=len(train_data)
+            ) if self.rank_zero else dummy_progress_bar() as pb:
                 for batch_idx, batch in enumerate(train_data):
                     batch = self.batch_process(batch)
                     pb_logs = self._train_step(batch, batch_idx)
                     if self.global_step % self.tb_log_steps == 0:
                         if self.tb_logger is not None:
-                            self.tb_logger(pb_logs,
-                                           self.global_step,
-                                           dtype="scalar")
+                            self.tb_logger(pb_logs, self.global_step, dtype="scalar")
                     if self.rank_zero:
-                        pb_logs = {k: f'{v:.3f}' for k, v in pb_logs.items()}
-                        pb_logs.update({'epoch': epoch})
-                        pb_logs.update({'step': self.global_step})
+                        pb_logs = {k: f"{v:.3f}" for k, v in pb_logs.items()}
+                        pb_logs.update({"epoch": epoch})
+                        pb_logs.update({"step": self.global_step})
                         pb.set_postfix(**pb_logs)
                         pb.update(1)
                     self.global_step += 1
-                    self.model.module.global_step += 1
+                    self.model.module.global_step = self.global_step
                     if batch_idx % 10 == 0:
                         gc.collect()
             self.epoch_idx += 1
@@ -318,31 +333,29 @@ class UlTrainer:
         # self.model.module.to(self.device)
         destroy_process_group()
 
-    def train_gan(self, train_data: DataLoader = None, train_sampler: DistributedSampler = None):
+    def train_gan(
+        self, train_data: DataLoader = None, train_sampler: DistributedSampler = None
+    ):
         raise NotImplementedError
 
     @torch.no_grad()
     def validate(self, val_data=None, using_ema=False):
         val_summary = {}
-        val_data = choice(self.model.module.val_dataloader()
-                          [0], val_data, val_data is None)
+        val_data = choice(
+            self.model.module.val_dataloader()[0], val_data, val_data is None
+        )
         assert len(val_data) > 0, "validation data length ==0"
-        with tqdm.tqdm(total=len(val_data)) if self.rank_zero else dummy_progress_bar() as pb:
+        with tqdm.tqdm(
+            total=len(val_data)
+        ) if self.rank_zero else dummy_progress_bar() as pb:
             if self.rank_zero:
-                self.cmd_logger.info(
-                    f"Starting Validation at Epoch  {self.epoch_idx}")
+                self.cmd_logger.info(f"Starting Validation at Epoch  {self.epoch_idx}")
             for batch_idx, batch in enumerate(val_data):
                 batch = self.batch_process(batch)
                 logs = self.model.module.validation_step(batch, batch_idx)
                 if using_ema:
-                    logs["scalar"] = {
-                        k + "_ema": v
-                        for k, v in logs["scalar"].items()
-                    }
-                    logs["image"] = {
-                        k + "_ema": v
-                        for k, v in logs["image"].items()
-                    }
+                    logs["scalar"] = {k + "_ema": v for k, v in logs["scalar"].items()}
+                    logs["image"] = {k + "_ema": v for k, v in logs["image"].items()}
                 scalar_logs, img_logs = logs["scalar"], logs["image"]
                 scalar_logs = self._gather_logs(scalar_logs, dtype="scalar")
                 if batch_idx == 0:
@@ -352,20 +365,21 @@ class UlTrainer:
                     for k, v in scalar_logs.items():
                         val_summary[k].append(v)
                 self.validation_scalar_idx += 1
-                if batch_idx == 0 and len(img_logs)>0:
+                if batch_idx == 0 and len(img_logs) > 0:
                     img_logs = self._gather_logs(img_logs, dtype="image")
                     if self.tb_logger is not None:
                         self.tb_logger(
-                            img_logs, self.validation_image_idx, dtype="image")
+                            img_logs, self.validation_image_idx, dtype="image"
+                        )
                     self.validation_image_idx += 1
                 if self.rank_zero:
-                    pb_logs = {k: f'{v:.3f}' for k, v in scalar_logs.items()}
+                    pb_logs = {k: f"{v:.3f}" for k, v in scalar_logs.items()}
                     pb.set_postfix(**pb_logs)
                     pb.update(1)
                     if batch_idx == 0 and len(img_logs) > 0:
                         if self.tb_logger is not None:
                             self.tb_logger.save_image_summary(img_logs)
-        val_summary = {k: sum(v)/len(v) for k, v in val_summary.items()}
+        val_summary = {k: sum(v) / len(v) for k, v in val_summary.items()}
         if self.tb_logger is not None:
             self.tb_logger(val_summary, self.epoch_idx, dtype="scalar")
         return val_summary
@@ -373,13 +387,12 @@ class UlTrainer:
     def _gather_logs(self, logs, dtype="scalar"):
         device = self.device
         if dtype == "scalar":
-            logs = {k: torch.Tensor([v]).to(self.device)
-                    for k, v in logs.items()}
+            logs = {k: torch.Tensor([v]).to(self.device) for k, v in logs.items()}
             g_tensor = {k: torch.Tensor([v]).to(device) for k, v in logs.items()}
             for k in g_tensor:
                 dist.reduce(g_tensor[k], 0, op=dist.ReduceOp.SUM)
                 g_tensor[k] = g_tensor[k] / torch.cuda.device_count()
-                g_tensor[k]  = g_tensor[k].item()
+                g_tensor[k] = g_tensor[k].item()
             gathered_logs = g_tensor
         else:
             logs = {k: v.to(self.device).contiguous() for k, v in logs.items()}
@@ -388,8 +401,9 @@ class UlTrainer:
                 for d in range(torch.cuda.device_count()):
                     gathered_logs[k].append(torch.ones_like(logs[k]).to(self.device))
                 dist.all_gather(gathered_logs[k], logs[k])
-            gathered_logs = {k: torch.stack(v).to("cpu")
-                             for k, v in gathered_logs.items()}
+            gathered_logs = {
+                k: torch.stack(v).to("cpu") for k, v in gathered_logs.items()
+            }
 
         return gathered_logs
 
@@ -404,21 +418,24 @@ class UlTrainer:
         self._optimizer_zero_grad()
         self._scheduler_step()
         with torch.no_grad():
-            if self.use_ema and ((self.global_step % self.ema_update_interval)==0):
+            if self.use_ema and ((self.global_step % self.ema_update_interval) == 0):
                 if is_initialized():
                     self.model_ema(self.model.module)
                 else:
                     self.model_ema(self.model)
         return logs_agg
 
-    def run_eval(self, val_data: DataLoader = None, val_sampler: DistributedSampler = None):
+    def run_eval(
+        self, val_data: DataLoader = None, val_sampler: DistributedSampler = None
+    ):
         self.model.module.eval()
         if self.tb_logger is not None:
             self.tb_logger.log_steps = 0
-        with tqdm.tqdm(total=len(val_data)) if self.rank_zero else dummy_progress_bar() as pb:
+        with tqdm.tqdm(
+            total=len(val_data)
+        ) if self.rank_zero else dummy_progress_bar() as pb:
             if self.rank_zero:
-                self.cmd_logger.info(
-                    f"Starting Validation at Epoch  {self.epoch_idx}")
+                self.cmd_logger.info(f"Starting Validation at Epoch  {self.epoch_idx}")
             scalar_summary = {}
             for batch_idx, batch in enumerate(val_data):
                 batch = self.batch_process(batch)
@@ -427,12 +444,10 @@ class UlTrainer:
                     with self.ema_scope("Run Eval"):
                         logs_ema = self.model.module.validation_step(batch, batch_idx)
                     logs_ema["scalar"] = {
-                        k + "_ema": v
-                        for k, v in logs_ema["scalar"].items()
+                        k + "_ema": v for k, v in logs_ema["scalar"].items()
                     }
                     logs_ema["image"] = {
-                        k + "_ema": v
-                        for k, v in logs_ema["image"].items()
+                        k + "_ema": v for k, v in logs_ema["image"].items()
                     }
                     logs["scalar"].update(logs_ema["scalar"])
                     logs["image"].update(logs_ema["image"])
@@ -447,7 +462,7 @@ class UlTrainer:
                 img_logs = self._gather_logs(img_logs, dtype="image")
                 self.validation_image_idx += 1
                 if self.rank_zero:
-                    pb_logs = {k: f'{v:.3f}' for k, v in scalar_logs.items()}
+                    pb_logs = {k: f"{v:.3f}" for k, v in scalar_logs.items()}
                     pb.set_postfix(**pb_logs)
                     pb.update(1)
                 if self.rank_zero:

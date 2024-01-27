@@ -308,6 +308,7 @@ class UlTrainer:
                         pb.set_postfix(**pb_logs)
                         pb.update(1)
                     self.global_step += 1
+                    self.model.module.global_step += 1
                     if batch_idx % 10 == 0:
                         gc.collect()
             self.epoch_idx += 1

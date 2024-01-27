@@ -272,11 +272,6 @@ class UlTrainer:
             train_data is None,
         )
         for epoch in range(self.epoch_idx, self.max_epochs):
-            # if epoch==0:
-            #     t_file = tempfile.NamedTemporaryFile(dir="./")
-            self.model.module.eval()
-            val_summary = self.validate()
-            self.model.module.train()
             if self.validate_every_x_epoch > 0 and (
                 self.epoch_idx % self.validate_every_x_epoch == 0
             ):
